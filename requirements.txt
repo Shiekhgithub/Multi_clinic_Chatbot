@@ -14,3 +14,8 @@ streamlit
 python-dotenv
 openai
 groq
+fastapi
+uvicorn[standard]
+python-multipart
+langchain-text-splitters
+pypdf
