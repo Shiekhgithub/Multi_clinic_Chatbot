@@ -36,7 +36,7 @@ def get_llm(provider: str = "groq") -> BaseLanguageModel:
     elif provider == "groq":
         from langchain_groq import ChatGroq
         return ChatGroq(
-            model=os.getenv("GROQ_MODEL", "llama3-8b-8192"),
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
             temperature=0.1,
         )
     elif provider == "gemini":
