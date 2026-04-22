@@ -7,6 +7,8 @@ langchain-google-genai
 langchain-chroma
 chromadb
 sentence-transformers
+torch
+torchvision
 pandas
 numpy
 scikit-learn
@@ -19,3 +21,4 @@ uvicorn[standard]
 python-multipart
 langchain-text-splitters
 pypdf
+python-jose[cryptography]

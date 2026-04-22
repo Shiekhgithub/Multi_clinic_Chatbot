@@ -11,12 +11,14 @@ Run:
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Annotated
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from jose import jwt, JWTError
 
 from vector_store import load_all_stores, stores_exist, get_embeddings
 from agent import build_agent
@@ -24,11 +26,87 @@ from agent import build_agent
 load_dotenv()
 
 # ──────────────────────────────────────────────
+# JWT auth (shared secret with NestJS backend)
+# ──────────────────────────────────────────────
+_JWT_SECRET = os.getenv("JWT_SECRET")
+_JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+_http_bearer = HTTPBearer(auto_error=False)
+
+
+def _verify_token(
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Security(_http_bearer),
+    ],
+) -> dict:
+    """Validate the Bearer JWT issued by the NestJS backend.
+
+    Raises HTTP 401 if JWT_SECRET is configured and the token is
+    missing or invalid.
+    When JWT_SECRET is not set the check is skipped (development convenience).
+    """
+    if not _JWT_SECRET:
+        # JWT_SECRET not configured — skip validation (dev mode)
+        return {}
+
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authentication token.",
+        )
+
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            _JWT_SECRET,
+            algorithms=[_JWT_ALGORITHM],
+        )
+        return payload
+    except JWTError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token.",
+        )
+
+
+# ──────────────────────────────────────────────
 # Global state
 # ──────────────────────────────────────────────
 agent_executor = None
 stores = None
 uploaded_collection = None
+
+DATASET_LABELS = {
+    "heart_disease": "Heart Disease dataset",
+    "dermatology": "Dermatology dataset",
+    "diabetes": "Diabetes dataset",
+}
+
+DATASET_KEYWORDS = {
+    "heart_disease": [
+        "heart",
+        "cardio",
+        "cholesterol",
+        "blood pressure",
+        "angina",
+        "ecg",
+    ],
+    "dermatology": [
+        "skin",
+        "rash",
+        "dermat",
+        "psoriasis",
+        "lesion",
+        "erythema",
+    ],
+    "diabetes": [
+        "diabetes",
+        "glucose",
+        "insulin",
+        "bmi",
+        "blood sugar",
+    ],
+}
 
 
 def _rebuild_agent():
@@ -42,6 +120,71 @@ def _rebuild_agent():
         return
 
     agent_executor = build_agent(stores, provider=provider, k=k)
+
+
+def _select_relevant_store_keys(question: str) -> List[str]:
+    lowered_question = question.lower()
+    matched_keys = [
+        store_key
+        for store_key, keywords in DATASET_KEYWORDS.items()
+        if any(keyword in lowered_question for keyword in keywords)
+    ]
+    if matched_keys:
+        return matched_keys
+    return list(DATASET_LABELS.keys())
+
+
+def _build_retrieval_fallback_answer(question: str) -> str:
+    if not stores:
+        return (
+            "The chatbot data stores are not loaded yet. "
+            "Please run `python ingest.py` first."
+        )
+
+    snippets: list[tuple[str, str]] = []
+    seen_snippets: set[str] = set()
+
+    for store_key in _select_relevant_store_keys(question):
+        for doc in stores[store_key].similarity_search(question, k=2):
+            snippet = " ".join(doc.page_content.split())
+            if snippet in seen_snippets:
+                continue
+            snippets.append((store_key, snippet))
+            seen_snippets.add(snippet)
+            if len(snippets) >= 4:
+                break
+        if len(snippets) >= 4:
+            break
+
+    if uploaded_collection is not None and len(snippets) < 4:
+        for doc in uploaded_collection.similarity_search(question, k=2):
+            snippet = " ".join(doc.page_content.split())
+            if snippet in seen_snippets:
+                continue
+            snippets.append(("uploaded_docs", snippet))
+            seen_snippets.add(snippet)
+            if len(snippets) >= 4:
+                break
+
+    if not snippets:
+        return (
+            "The chatbot could not reach the configured language model, "
+            "and no "
+            "relevant local records were found for this question."
+        )
+
+    answer_lines = [
+        "The configured language model is currently unavailable, "
+        "so this response uses the closest matching local records:",
+    ]
+    for store_key, snippet in snippets:
+        label = DATASET_LABELS.get(store_key, "Uploaded document")
+        answer_lines.append(f"- {label}: {snippet}")
+    answer_lines.append(
+        "Add a working Groq/OpenAI key or available Gemini quota "
+        "for a more synthesized answer."
+    )
+    return "\n".join(answer_lines)
 
 
 @asynccontextmanager
@@ -105,7 +248,10 @@ async def health():
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    _user: Annotated[dict, Depends(_verify_token)],
+):
     """Send a question to the Healthcare RAG agent."""
     if agent_executor is None:
         raise HTTPException(
@@ -132,11 +278,16 @@ async def chat(request: ChatRequest):
         return ChatResponse(Assistant=answer)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"⚠️ Agent invocation failed, using retrieval fallback: {e}")
+        fallback_answer = _build_retrieval_fallback_answer(request.question)
+        return ChatResponse(Assistant=fallback_answer)
 
 
 @app.post("/Upload_File", response_model=UploadResponse)
-async def upload_file(files: List[UploadFile] = File(...)):
+async def upload_file(
+    files: List[UploadFile] = File(...),
+    _user: dict = Depends(_verify_token),
+):
     """Upload PDF, TXT, or MD documents for RAG processing."""
     from langchain_core.documents import Document
     from langchain_text_splitters import RecursiveCharacterTextSplitter

@@ -46,6 +46,12 @@ Place all project files in a folder, e.g. `healthcare_rag/`.
 pip install -r requirements.txt
 ```
 
+If you are on Windows and Streamlit later reports `ModuleNotFoundError: No module named 'torchvision'`, install the CPU wheels explicitly:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
+
 ### 3. Configure environment
 
 ```bash
@@ -160,10 +166,11 @@ ReAct Agent (LangChain)
 |----------|-------|-------|
 | **Groq** | Free at [console.groq.com](https://console.groq.com) | Fast, recommended |
 | **OpenAI** | [platform.openai.com](https://platform.openai.com) | Paid |
+| **Gemini** | [aistudio.google.com](https://aistudio.google.com/apikey) | Free tier may be quota-limited by region/project |
 
 Switch provider in `.env`:
 ```env
-LLM_PROVIDER=groq   # or openai
+LLM_PROVIDER=groq   # or openai or gemini
 ```
 
 ---
@@ -184,3 +191,4 @@ LLM_PROVIDER=groq   # or openai
 - To **rebuild** stores (after new data), delete `./chroma_db/` and re-run `python ingest.py`.
 - The embedding model runs **locally** on CPU — no API key needed for embeddings.
 - The agent automatically routes questions to the correct dataset(s).
+- `streamlit` plus recent `transformers` builds can touch optional vision modules during file watching. This repo now includes `torchvision` explicitly to avoid that startup error.
